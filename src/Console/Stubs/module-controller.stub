@@ -11,6 +11,7 @@ use {{ rootNamespace }}Http\Resources\{{ class }}Resource;
 use {{ rootNamespace }}Services\{{ class }}Service;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use MuhammedSalama\Base\Helpers\ApiResponse;
 
 /**
@@ -40,10 +41,12 @@ class {{ controller }} extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $this->authorize('viewAny', {{ model }}::class);
+        Gate::authorize('viewAny', {{ model }}::class);
+
+        $paginator = $this->service->filter($request)->paginate();
 
         return ApiResponse::paginated(
-            $this->service->filter($request)->paginate()
+            $paginator->through(fn ({{ model }} ${{ modelVariable }}) => new {{ class }}Resource(${{ modelVariable }}))
         );
     }
 
@@ -61,7 +64,7 @@ class {{ controller }} extends Controller
     public function show(int $id): JsonResponse
     {
         ${{ modelVariable }} = $this->service->find($id);
-        $this->authorize('view', ${{ modelVariable }});
+        Gate::authorize('view', ${{ modelVariable }});
 
         return ApiResponse::success(new {{ class }}Resource(${{ modelVariable }}));
     }
@@ -78,7 +81,7 @@ class {{ controller }} extends Controller
      */
     public function store(Store{{ class }}Request $request): JsonResponse
     {
-        $this->authorize('create', {{ model }}::class);
+        Gate::authorize('create', {{ model }}::class);
 
         return ApiResponse::created(
             new {{ class }}Resource($this->service->store($request->validated()))
@@ -99,7 +102,7 @@ class {{ controller }} extends Controller
     public function update(Update{{ class }}Request $request, int $id): JsonResponse
     {
         ${{ modelVariable }} = $this->service->find($id);
-        $this->authorize('update', ${{ modelVariable }});
+        Gate::authorize('update', ${{ modelVariable }});
 
         return ApiResponse::success(
             new {{ class }}Resource($this->service->update($id, $request->validated()))
@@ -120,7 +123,7 @@ class {{ controller }} extends Controller
     public function destroy(int $id): JsonResponse
     {
         ${{ modelVariable }} = $this->service->find($id);
-        $this->authorize('delete', ${{ modelVariable }});
+        Gate::authorize('delete', ${{ modelVariable }});
 
         $this->service->destroy($id);
 

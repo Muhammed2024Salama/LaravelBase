@@ -258,9 +258,38 @@ jobs:
             --no-enum --no-filter --no-policy --no-resource --no-test --no-migration \
             --no-interaction
 
-      # 4. Minimal subset — interface + repository + service only.
+      # 4. Minimal subset — model + interface + repository + service.
+      #    Self-consistent on purpose: the repository imports the model, so
+      #    leaving the model out would (correctly) produce a dangling reference.
       - name: "Generate: minimal subset (SmokeMin)"
-        run: ./vendor/bin/testbench make:module SmokeMin --only=interface,repository,service --no-interaction
+        run: ./vendor/bin/testbench make:module SmokeMin --only=model,interface,repository,service --no-interaction
+
+      # 5. Deliberately incomplete subset — the generated controller type-hints a
+      #    Service that was never generated. The command must say so rather than
+      #    emitting a broken file silently. Generated into a throwaway name that
+      #    the dangling-reference pass below skips.
+      - name: "Generate: incomplete subset warns about dangling deps"
+        run: |
+          out=$(./vendor/bin/testbench make:module SmokeDangling --only=controller --no-interaction 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'reference classes that do not exist yet' \
+            || { echo "ERROR: expected a dangling-dependency warning"; exit 1; }
+          echo "$out" | grep -q 'App.Services.SmokeDanglingService' \
+            || { echo "ERROR: expected the missing service to be named"; exit 1; }
+          rm -f vendor/orchestra/testbench-core/laravel/app/Http/Controllers/SmokeDanglingController.php
+
+      # 6. Invalid module names must be rejected before anything is written.
+      - name: "Generate: invalid names are rejected"
+        run: |
+          for name in '123abc' 'class' '../../evil'; do
+            if ./vendor/bin/testbench make:module "$name" --only=model --no-interaction; then
+              echo "ERROR: make:module accepted invalid name '$name'"
+              exit 1
+            fi
+          done
+          test ! -e vendor/orchestra/testbench-core/laravel/evil.php \
+            || { echo "ERROR: generator escaped app/"; exit 1; }
+          echo "  OK   invalid module names rejected"
 
       # --- Lint pass -------------------------------------------------------
       # php -l every file the generator placed in app/, tests/, and
@@ -288,6 +317,36 @@ jobs:
             echo "  php -l $f"
             php -l "$f"
           done
+
+      # --- Dangling reference pass -----------------------------------------
+      # php -l only proves a file parses. A generated file that imports a class
+      # which was never generated parses fine and then explodes in the
+      # container, so check every `use App\…;` / `App\…::class` reference
+      # against the files actually on disk.
+      - name: Verify generated files reference no missing classes
+        run: |
+          python3 - <<'EOF'
+          import os, re, sys
+          app = 'vendor/orchestra/testbench-core/laravel/app'
+          missing = {}
+          for root, _, files in os.walk(app):
+              for fn in files:
+                  if not fn.endswith('.php'):
+                      continue
+                  path = os.path.join(root, fn)
+                  src = open(path).read()
+                  refs = set(re.findall(r'^use\s+(App\\[A-Za-z0-9_\\]+);', src, re.M))
+                  refs |= set(re.findall(r'\\?(App\\[A-Za-z0-9_\\]+)::class', src))
+                  for ref in refs:
+                      target = os.path.join(app, ref[len('App\\'):].replace('\\', '/') + '.php')
+                      if not os.path.isfile(target):
+                          missing.setdefault(os.path.relpath(path, app), []).append(ref)
+          for f, refs in sorted(missing.items()):
+              print(f"  FAIL {f} references missing {', '.join(sorted(refs))}")
+          if missing:
+              sys.exit(1)
+          print("  OK   no generated file references a class that was not generated")
+          EOF
 
       # --- Existence assertions --------------------------------------------
       - name: Verify expected files from full module (SmokeTest)

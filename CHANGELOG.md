@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **`ImageUploadTrait` no longer writes non-image uploads into the web root.** The
+  stored extension is now taken from an allow-list keyed by the *detected* MIME type;
+  anything else is refused and no file is written. Previously the extension came from
+  `UploadedFile::extension()` unfiltered, so a `text/html` payload became
+  `public/…/media_*.html` and an `image/svg+xml` payload became `…​.svg` — stored XSS on
+  the application's own origin — while a PHP payload could resolve to `.php` on hosts
+  whose `fileinfo` reports `application/x-httpd-php`. Destination paths are also
+  normalised and `..` traversal segments rejected.
+- **`updateImage()` no longer deletes the previous file before the replacement
+  succeeds.** A rejected or failed upload used to destroy the existing image.
+- **The reduced (`controller.plain.stub`) controller no longer forwards raw request
+  input.** `$request->except(['_token', '_method'])` went straight into a model
+  generated with `$guarded = []`; it now passes `$request->validate(...)` output.
+- **`make:module` validates the module, model and controller names.** `make:module
+  ../../evil` previously wrote outside `app/`, and names like `123abc` or `class`
+  produced files that do not parse.
+- **`AbstractFilter` ignores array-valued parameters** instead of raising
+  "Array to string conversion". `?search[]=a`, `?sort_dir[]=desc` and an array on a
+  `like` filter were request-triggerable 500s on every filtered endpoint.
+
+### Fixed
+- **Generated controllers use `Gate::authorize()` instead of `$this->authorize()`.**
+  The latter only exists when the application's base controller uses
+  `AuthorizesRequests`, which the Laravel 11+ skeleton dropped — every CRUD action
+  fataled with "Call to undefined method" on Laravel 11, 12 and 13.
+- **`index()` wraps rows in `{Name}Resource`.** It previously returned raw models, so
+  the list endpoint exposed every column regardless of the resource definition.
+- **`--force` rewrites the existing `create_{table}_table` migration in place** instead
+  of adding a second, freshly timestamped one that broke `php artisan migrate`.
+- **`config('base.bindings')` now takes precedence over convention auto-binding.**
+  Explicit bindings were registered first and then silently overwritten.
+- **Auto-binding validates its candidates.** A binding is only registered when the
+  implementation exists, is concrete, and actually implements the interface; malformed
+  entries in `config('base.bindings')` are skipped instead of binding an interface to
+  `null`. Interface names containing "Interface" more than once now map correctly.
+- **`ApiResponseTrait` gained the documented `unauthorized()` and `forbidden()`
+  methods**, which existed in the published stub but not in the package trait.
+- **`make:module` reports dangling references.** Subsets such as `--only=controller` or
+  `--no-service` emit files referencing classes that were never generated; the command
+  now lists them instead of failing silently.
+
+### Changed
+- README corrected where it described behaviour the code did not have: the policy stub
+  does not use `HandlesAuthorization`, authorization is generated for the full module
+  controller only, and the LIKE-wildcard passthrough is now documented explicitly.
+
 ## [3.0.1] - 2026-06-18
 
 ### Added

@@ -135,7 +135,7 @@ The generated code is idiomatic Laravel — no framework-within-a-framework, no 
 | **Driver-aware migrations** | Detects MySQL / PostgreSQL / SQLite at runtime; uses `json()` on MySQL/PG, `text()` fallback otherwise |
 | **Swagger / OpenAPI** | Generated controllers carry `@OA\*` PHPDoc annotations (l5-swagger / swagger-php compatible) — optional, gated behind `suggest` |
 | **Status Enums** | PHP 8.1 backed string enum (`Active`, `Inactive`, `Pending`) with `label()`, `isActive()`, `values()`; model casts `status` automatically |
-| **Policy** | Full CRUD policy stub with `HandlesAuthorization`; controller calls `$this->authorize()` for every action |
+| **Policy** | Full CRUD policy stub (`viewAny`, `view`, `create`, `update`, `delete`, `restore`, `forceDelete`); the generated controller calls `Gate::authorize()` for every action |
 | **API Resource** | `JsonResource` + `ResourceCollection` with `@OA\Schema`; controller returns wrapped resources via `ApiResponse` |
 | **Generated tests** | Feature + Unit test stubs that pass (skipped) from the first commit; inline TODO instructions |
 | **Repository pattern** | `BaseRepository` with `all`, `paginate`, `find`, `findOrFail`, `findBy`, `create`, `update`, `delete`, `query` |
@@ -143,7 +143,7 @@ The generated code is idiomatic Laravel — no framework-within-a-framework, no 
 | **Contracts-first design** | `RepositoryInterface` / `ServiceInterface` with full native type hints |
 | **External validation** | `BaseRequest` returns a standard 422 JSON envelope on failure — no extra code |
 | **Consistent API responses** | Static `ApiResponse` helper + `ApiResponseTrait` — identical JSON shape everywhere |
-| **Image handling** | Secure upload / update / delete via `ImageUploadTrait` (MIME-derived extension) |
+| **Image handling** | `ImageUploadTrait` — upload / update / delete with a strict image MIME allow-list; non-image payloads are rejected outright |
 | **Auto-binding** | `*RepositoryInterface` auto-bound to `*Repository` by naming convention — no manual registration |
 | **Laravel 10/11/12/13, PHP 8.1+** | No upper-bound constraint on Laravel version |
 
@@ -157,19 +157,19 @@ The generated code is idiomatic Laravel — no framework-within-a-framework, no 
 | Generate migration | `make:migration` (separate command) | Auto-generated, **driver-aware** — `json()` on MySQL/PG, `text()` with notice on SQLite |
 | Repository pattern | Not provided | `BaseRepository` + `RepositoryInterface` + generated `{Name}Repository` + `{Name}RepositoryInterface` |
 | Service layer | Not provided | `BaseService` + `ServiceInterface` + generated `{Name}Service` |
-| Controller | `make:controller --api` (empty method bodies) | Full CRUD controller with `$this->authorize()`, typed requests, `ApiResponse` calls, and Swagger annotations |
+| Controller | `make:controller --api` (empty method bodies) | Full CRUD controller with `Gate::authorize()`, typed requests, `ApiResponse` calls, and Swagger annotations |
 | Form Requests | `make:request` (separate command, manual wiring) | `Store{Name}Request` + `Update{Name}Request` generated and wired; `BaseRequest` returns JSON 422 envelope automatically |
 | JSON API response helper | Not provided | `ApiResponse` — `success` / `created` / `error` / `notFound` / `paginated` with a consistent `{status, message, data, meta}` envelope |
 | Status Enum | Not provided | PHP 8.1 backed string enum with `label()`, `isActive()`, `values()`; model casts `status` automatically |
 | Query filtering + pagination | Not provided | `AbstractFilter`: whitelisted column filters, LIKE search, global `?search=`, sort whitelist, `?per_page=` clamped to [1, 100] |
 | API Resource + Collection | `make:resource` (separate command) | `{Name}Resource` + `{Name}ResourceCollection` generated and wired into controller; includes `@OA\Schema` annotation |
-| Policy | `make:policy` (separate command, manual registration) | `{Name}Policy` with `HandlesAuthorization`, all CRUD gates; controller calls `$this->authorize()` for every action |
+| Policy | `make:policy` (separate command, manual registration) | `{Name}Policy` with all CRUD gates; controller calls `Gate::authorize()` for every action |
 | Swagger / OpenAPI docs | Not provided | All 5 CRUD actions annotated (`@OA\Get/Post/Put/Delete`); compatible with `darkaonline/l5-swagger` |
 | Repository auto-binding | Not provided | Convention-based: `*RepositoryInterface` → `*Repository` resolved at boot; no `ServiceProvider` edit required |
 | Explicit provider binding | Not provided | `--provider` flag creates/updates `RepositoryServiceProvider`; idempotent on re-runs |
 | Generated tests | Not provided | Feature + Unit test stubs, pre-skipped (CI stays green), with inline TODO instructions |
 | Database creation command | Not provided | `base:create-database [--connection=]` — MySQL and PostgreSQL |
-| Image upload helper | Not provided | `ImageUploadTrait`: MIME-derived extension (prevents extension-spoofing), upload / update / delete |
+| Image upload helper | Not provided | `ImageUploadTrait`: extension chosen from an allow-list keyed by the detected MIME type; anything that is not a raster image is refused |
 | Subset generation | N/A | `--only=` / `--except=` — generate any combination of the 15 components |
 | Per-component skip flags | N/A | `--no-model`, `--no-migration`, `--no-enum`, `--no-filter`, `--no-service`, `--no-request`, `--no-resource`, `--no-policy`, `--no-controller`, `--no-test` |
 | Laravel version support | Current only | 10, 11, 12, 13 |
@@ -283,7 +283,7 @@ HTTP Request
 Controller              (thin — delegates, authorizes, transforms)
     │  uses ApiResponse::
     │  type-hints Form Requests (Store/Update)
-    │  calls $this->authorize() via Policy
+    │  calls Gate::authorize() via Policy
     │  returns ApiResource-wrapped data
     ▼
 Filters class           (AbstractFilter — request-driven, whitelisted)
@@ -359,6 +359,17 @@ php artisan make:module Category --except=policy,test
 
 `--only` takes priority over `--except`. When both are omitted, all components are generated.
 
+When the requested subset leaves a generated file referring to a class that was not
+generated and does not already exist (for example `--only=controller`, where the
+controller type-hints `{Name}Service`), the command lists the missing classes instead of
+failing silently — the files are still written, so you can regenerate one layer of an
+existing module.
+
+The module name is normalised with `Str::studly`, so `user-profile` and `user_profile`
+both become `UserProfile`. Names that cannot become a valid PHP class name — digits
+first, path separators, reserved keywords such as `class` or `match` — are rejected with
+an error and nothing is written.
+
 ### Per-component --no-* flags
 
 | Flag | Skips | Side effect |
@@ -367,7 +378,7 @@ php artisan make:module Category --except=policy,test
 | `--no-migration` | Migration | |
 | `--no-enum` | Status Enum | Uses plain `model.stub` (no cast) |
 | `--no-filter` | Filters class | Uses plain `service.stub` (no `filter()` method) and `controller.stub` |
-| `--no-service` | Service | |
+| `--no-service` | Service | The controller still type-hints `{Name}Service`; the command warns about the dangling reference |
 | `--no-request` | Store + Update Requests | Uses `controller.plain.stub` |
 | `--no-resource` | API Resource + Collection | Falls back to `controller.stub` |
 | `--no-policy` | Policy | Falls back to `controller.stub` |
@@ -381,7 +392,7 @@ php artisan make:module Category --except=policy,test
 | `--model=Foo` | Use `Foo` as the Eloquent model name (default: same as module name) |
 | `--controller=FooController` | Custom controller class name |
 | `--provider` | Create / update `RepositoryServiceProvider` with a binding for the interface |
-| `--force` | Overwrite existing files (model is **never** overwritten regardless) |
+| `--force` | Overwrite existing files (model is **never** overwritten regardless). An existing `create_{table}_table` migration is rewritten in place, not duplicated under a new timestamp |
 
 ---
 
@@ -397,10 +408,12 @@ Every generated module ships with a `{Name}Filters` class extending
 // {Name}Controller::index() — generated automatically
 public function index(Request $request): JsonResponse
 {
-    $this->authorize('viewAny', Product::class);
+    Gate::authorize('viewAny', Product::class);
+
+    $paginator = $this->service->filter($request)->paginate();
 
     return ApiResponse::paginated(
-        $this->service->filter($request)->paginate()
+        $paginator->through(fn (Product $product) => new ProductResource($product))
     );
 }
 ```
@@ -439,7 +452,16 @@ class ProductFilters extends AbstractFilter
 | `?sort_dir=desc` | Sort direction; anything other than `desc` defaults to `asc` |
 | `?per_page=25` | Page size; clamped to `[1, 100]`; default 15 |
 
-**Security:** only columns declared in `$filters` or `$sortable` are ever applied to the query. Unknown request parameters are silently ignored — the filter is safe against column-injection attacks.
+**Security:** column names and sort directions never come from the request. Only columns
+declared in `$filters` or `$sortable` are applied, the operator comes from your `$filters`
+map, `sort_dir` is normalised to `asc`/`desc`, and every value is passed as a bound
+parameter. Unknown request parameters are silently ignored, and array-valued parameters
+(`?search[]=a&search[]=b`, `?sort_dir[]=desc`) are ignored rather than raising an error.
+
+One thing the filter deliberately does **not** do: `%` and `_` inside a `like` filter or a
+`?search=` term are passed through to SQL as wildcards, matching Laravel's own `where(...,
+'like', ...)` behaviour. That is not injection — the value is still bound — but a caller
+can broaden their own match. Escape the term yourself if you need a literal `%`.
 
 ### AbstractFilter API
 
@@ -453,6 +475,9 @@ $paginator = $filter->paginate($perPage = 15);
 // Standard one-liner
 return ApiResponse::paginated($this->service->filter($request)->paginate());
 ```
+
+> `paginate()` reads `?per_page=` from the request and clamps it to `[1, 100]`; the
+> argument is only the fallback when the request does not supply one.
 
 `apply()` is idempotent — safe to call multiple times without duplicating WHERE clauses.
 
@@ -562,8 +587,9 @@ ProductStatus::values();               // ['active', 'inactive', 'pending']
 
 ## Policy
 
-The generated `{Name}Policy` uses `HandlesAuthorization` and starts with all gates open
-(`return true`). Harden the logic to match your business rules before production.
+The generated `{Name}Policy` starts with all gates open (`return true`), except
+`forceDelete()` which starts closed. Harden the logic to match your business rules
+before production.
 
 ### Registration
 
@@ -577,15 +603,28 @@ protected $policies = [
 \Illuminate\Support\Facades\Gate::policy(Product::class, ProductPolicy::class);
 ```
 
-The generated controller calls `$this->authorize()` for every action automatically:
+The generated controller calls `Gate::authorize()` for every action automatically:
 
 ```php
-$this->authorize('viewAny', Product::class);  // index
-$this->authorize('view',    $product);         // show
-$this->authorize('create',  Product::class);   // store
-$this->authorize('update',  $product);         // update
-$this->authorize('delete',  $product);         // destroy
+use Illuminate\Support\Facades\Gate;
+
+Gate::authorize('viewAny', Product::class);  // index
+Gate::authorize('view',    $product);        // show
+Gate::authorize('create',  Product::class);  // store
+Gate::authorize('update',  $product);        // update
+Gate::authorize('delete',  $product);        // destroy
 ```
+
+The `Gate` facade is used rather than `$this->authorize()` on purpose: the latter
+only exists when the application's base controller uses
+`Illuminate\Foundation\Auth\Access\AuthorizesRequests`, which the Laravel 11+
+skeleton no longer does. `Gate::authorize()` behaves identically on Laravel 10
+through 13 and throws the same `AuthorizationException` (HTTP 403).
+
+> Authorization is generated for the **full module controller** only. Reduced
+> controllers (produced when `--no-policy`, `--no-resource`, `--no-filter` or
+> `--no-request` is used) contain no authorization calls, because the policy they
+> would reference may not exist — add your own.
 
 ---
 
@@ -603,8 +642,13 @@ return ApiResponse::success(new ProductResource($product));
 // Created
 return ApiResponse::created(new ProductResource($product));
 
-// Paginated list (via the filter's paginator)
-return ApiResponse::paginated($this->service->filter($request)->paginate());
+// Paginated list (via the filter's paginator) — rows are wrapped in the
+// resource too, so index() never returns raw model attributes
+$paginator = $this->service->filter($request)->paginate();
+
+return ApiResponse::paginated(
+    $paginator->through(fn (Product $product) => new ProductResource($product))
+);
 ```
 
 ---
@@ -632,6 +676,11 @@ Enable the feature tests by:
 By default (`auto_bind => true` in `config/base.php`), the package scans
 `app/Interfaces/*RepositoryInterface.php` at boot and binds each to its matching
 `app/Repositories/*Repository.php` — no manual registration required.
+
+A binding is only registered when the implementation exists, is concrete, and actually
+implements the interface. An interface with no implementation, a half-written class, or a
+name collision is skipped rather than breaking application boot. Anything you declare in
+`config('base.bindings')` always wins over the convention.
 
 To manage bindings explicitly, use `--provider` when generating:
 
@@ -826,34 +875,34 @@ class ProductController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $this->authorize('viewAny', Product::class);
+        Gate::authorize('viewAny', Product::class);
         return ApiResponse::paginated($this->service->filter($request)->paginate());
     }
 
     public function show(int $id): JsonResponse
     {
         $product = $this->service->find($id);
-        $this->authorize('view', $product);
+        Gate::authorize('view', $product);
         return ApiResponse::success(new ProductResource($product));
     }
 
     public function store(StoreProductRequest $request): JsonResponse
     {
-        $this->authorize('create', Product::class);
+        Gate::authorize('create', Product::class);
         return ApiResponse::created(new ProductResource($this->service->store($request->validated())));
     }
 
     public function update(UpdateProductRequest $request, int $id): JsonResponse
     {
         $product = $this->service->find($id);
-        $this->authorize('update', $product);
+        Gate::authorize('update', $product);
         return ApiResponse::success(new ProductResource($this->service->update($id, $request->validated())));
     }
 
     public function destroy(int $id): JsonResponse
     {
         $product = $this->service->find($id);
-        $this->authorize('delete', $product);
+        Gate::authorize('delete', $product);
         $this->service->destroy($id);
         return ApiResponse::success(null, 'Product deleted successfully.');
     }
@@ -1004,15 +1053,32 @@ identical JSON envelope.
 
 ### ImageUploadTrait
 
-`MuhammedSalama\Base\Traits\ImageUploadTrait` — extensions are derived from MIME type, not
-the client-supplied filename, preventing extension-spoofing attacks.
+`MuhammedSalama\Base\Traits\ImageUploadTrait` — the stored extension comes from an
+allow-list keyed by the *detected* MIME type (finfo, on the file contents), never from
+the client-supplied filename. Anything outside the allow-list is rejected and no file is
+written, so an HTML, SVG or PHP payload can never reach the web root under a
+script-capable extension.
 
 | Method | Returns | Description |
 |---|---|---|
-| `uploadImage($request, $input, $path)` | `string\|null` | Store a single image |
-| `uploadMultiImage($request, $input, $path)` | `array<int, string>` | Store multiple images |
-| `updateImage($request, $input, $path, $oldPath)` | `string\|null` | Replace an image, deletes old file |
+| `uploadImage($request, $input, $path)` | `string\|null` | Store a single image; `null` when the input is absent or not an allowed image |
+| `uploadMultiImage($request, $input, $path)` | `array<int, string>` | Store multiple images; rejected files are skipped |
+| `updateImage($request, $input, $path, $oldPath)` | `string\|null` | Replace an image; the old file is deleted **only after** the new one is written |
 | `deleteImage($path)` | `void` | Delete an image |
+
+**Accepted types:** `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/avif`,
+`image/bmp`, `image/tiff`. Everything else — including SVG, which is scriptable — returns
+`null` and writes nothing. Override `allowedImageMimeTypes(): array` in the consuming
+class to change the map:
+
+```php
+protected function allowedImageMimeTypes(): array
+{
+    return parent::allowedImageMimeTypes() + ['image/heic' => 'heic'];
+}
+```
+
+`$path` is resolved relative to `public_path()`; any `..` traversal segment is rejected.
 
 ```php
 // Store
@@ -1025,7 +1091,8 @@ $path = $this->updateImage($request, 'image', 'uploads/products', $product->imag
 $this->deleteImage($product->image);
 ```
 
-Always validate uploads in the Form Request first:
+The trait is a hard backstop, not a substitute for validation — it cannot tell the user
+*why* an upload was refused. Still validate in the Form Request so the client gets a 422:
 
 ```php
 'image' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:2048',
@@ -1048,7 +1115,8 @@ return [
     // Auto-bind App\Interfaces\{Name}RepositoryInterface → App\Repositories\{Name}Repository
     'auto_bind' => true,
 
-    // Explicit bindings always registered regardless of auto_bind
+    // Explicit bindings — always registered, and they take precedence over
+    // anything auto_bind resolved by convention.
     'bindings'  => [
         // \App\Interfaces\ProductRepositoryInterface::class
         //     => \App\Repositories\EloquentProductRepository::class,
