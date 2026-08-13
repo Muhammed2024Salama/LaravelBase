@@ -94,8 +94,17 @@ class MakeModuleCommandTest extends TestCase
         $this->assertStringContainsString('ApiResponse::paginated', $controllerContent);
         $this->assertStringContainsString('LampResource', $controllerContent);
         $this->assertStringContainsString('@OA\Get', $controllerContent);
-        $this->assertStringContainsString('$this->authorize', $controllerContent);
         $this->assertStringContainsString('filter($request)->paginate()', $controllerContent);
+
+        $this->assertStringContainsString("Gate::authorize('viewAny'", $controllerContent);
+        $this->assertStringContainsString("Gate::authorize('view'", $controllerContent);
+        $this->assertStringContainsString("Gate::authorize('create'", $controllerContent);
+        $this->assertStringContainsString("Gate::authorize('update'", $controllerContent);
+        $this->assertStringContainsString("Gate::authorize('delete'", $controllerContent);
+        $this->assertStringContainsString('use Illuminate\Support\Facades\Gate;', $controllerContent);
+        $this->assertStringNotContainsString('$this->authorize', $controllerContent);
+
+        $this->assertStringContainsString('through(fn (Lamp $lamp) => new LampResource($lamp))', $controllerContent);
     }
 
     public function test_full_module_service_contains_filter_method(): void
@@ -493,5 +502,273 @@ class MakeModuleCommandTest extends TestCase
         $content = File::get($providerPath);
         $this->assertStringContainsString('BoltRepositoryInterface::class', $content);
         $this->assertStringContainsString('BoltRepository::class', $content);
+    }
+
+    // -------------------------------------------------------------------------
+    // Module name validation
+    // -------------------------------------------------------------------------
+
+    /**
+     * The name is interpolated straight into both the class declaration and the
+     * destination path, so '../../evil' escaped app/ altogether and '123abc' /
+     * 'class' produced files that do not parse.
+     */
+    public function test_invalid_module_names_are_rejected(): void
+    {
+        foreach (['123abc', 'Foo/Bar', '../../evil', '@#$', '-', ''] as $name) {
+            $this->artisan('make:module', ['name' => $name, '--only' => 'model'])
+                ->expectsOutputToContain('is not a valid PHP class name')
+                ->assertFailed();
+        }
+
+        $this->assertFileDoesNotExist(base_path('evil.php'));
+        $this->assertFileDoesNotExist(app_path('Models/123abc.php'));
+    }
+
+    public function test_reserved_php_keywords_are_rejected_as_module_names(): void
+    {
+        foreach (['class', 'list', 'match', 'enum', 'static'] as $name) {
+            $this->artisan('make:module', ['name' => $name, '--only' => 'model'])
+                ->expectsOutputToContain('is a reserved PHP keyword')
+                ->assertFailed();
+        }
+
+        $this->assertFileDoesNotExist(app_path('Models/Class.php'));
+    }
+
+    public function test_invalid_model_and_controller_options_are_rejected(): void
+    {
+        $this->artisan('make:module', ['name' => 'Anchor', '--model' => '9Lives', '--only' => 'model'])
+            ->expectsOutputToContain('Model name')
+            ->assertFailed();
+
+        $this->artisan('make:module', ['name' => 'Anchor', '--controller' => 'Foo/Bar', '--only' => 'controller'])
+            ->expectsOutputToContain('Controller name')
+            ->assertFailed();
+    }
+
+    public function test_kebab_and_snake_names_are_still_accepted(): void
+    {
+        $this->createdPaths = [app_path('Models/UserProfile.php')];
+
+        $this->artisan('make:module', ['name' => 'user-profile', '--only' => 'model'])
+            ->assertSuccessful();
+
+        $this->assertFileExists(app_path('Models/UserProfile.php'));
+    }
+
+    // -------------------------------------------------------------------------
+    // Migrations
+    // -------------------------------------------------------------------------
+
+    /**
+     * --force is documented as "overwrite files that already exist". For the
+     * migration it used to write a *second*, freshly timestamped
+     * create_{table}_table file, leaving two migrations that both call
+     * Schema::create() — `php artisan migrate` then fails on a clean database.
+     */
+    public function test_force_overwrites_the_existing_migration_instead_of_duplicating_it(): void
+    {
+        $migrationDir = database_path('migrations');
+        File::ensureDirectoryExists($migrationDir);
+
+        $existing = $migrationDir.'/2000_01_01_000000_create_rivets_table.php';
+        File::put($existing, '<?php // stale');
+
+        $this->createdPaths = [$existing];
+
+        $this->artisan('make:module', [
+            'name' => 'Rivet',
+            '--only' => 'migration',
+            '--force' => true,
+        ])->assertSuccessful();
+
+        $migrations = glob($migrationDir.'/*_create_rivets_table.php') ?: [];
+        $this->createdPaths = $migrations;
+
+        $this->assertCount(1, $migrations, 'a second create_rivets_table migration must not be generated');
+        $this->assertSame($existing, $migrations[0]);
+        $this->assertStringContainsString("Schema::create('rivets'", File::get($existing));
+        $this->assertStringNotContainsString('stale', File::get($existing));
+    }
+
+    public function test_migration_is_skipped_without_force_when_one_already_exists(): void
+    {
+        $migrationDir = database_path('migrations');
+        File::ensureDirectoryExists($migrationDir);
+
+        $existing = $migrationDir.'/2000_01_01_000000_create_studs_table.php';
+        File::put($existing, '<?php // hand-written');
+
+        $this->createdPaths = [$existing];
+
+        $this->artisan('make:module', [
+            'name' => 'Stud',
+            '--only' => 'migration',
+        ])->assertSuccessful();
+
+        $migrations = glob($migrationDir.'/*_create_studs_table.php') ?: [];
+        $this->createdPaths = $migrations;
+
+        $this->assertCount(1, $migrations);
+        $this->assertStringContainsString('hand-written', File::get($existing));
+    }
+
+    // -------------------------------------------------------------------------
+    // Generated code must never reference components that were not generated
+    // -------------------------------------------------------------------------
+
+    /**
+     * `--only=controller` happily emitted a controller type-hinting
+     * App\Services\{Name}Service, which the container cannot resolve. The files
+     * are still written (the developer may be regenerating one layer of an
+     * existing module) but the command has to say so.
+     */
+    public function test_controller_without_service_reports_the_missing_dependency(): void
+    {
+        $this->createdPaths = [app_path('Http/Controllers/HingeController.php')];
+
+        $this->artisan('make:module', [
+            'name' => 'Hinge',
+            '--only' => 'controller',
+        ])
+            ->expectsOutputToContain('Generated files reference classes that do not exist yet')
+            ->expectsOutputToContain('App\Services\HingeService')
+            ->assertSuccessful();
+    }
+
+    public function test_service_without_interface_reports_the_missing_dependency(): void
+    {
+        $this->createdPaths = [app_path('Services/LatchService.php')];
+
+        $this->artisan('make:module', [
+            'name' => 'Latch',
+            '--only' => 'service',
+        ])
+            ->expectsOutputToContain('App\Interfaces\LatchRepositoryInterface')
+            ->expectsOutputToContain('App\Repositories\LatchRepository')
+            ->assertSuccessful();
+    }
+
+    public function test_no_service_flag_reports_the_dangling_controller_dependency(): void
+    {
+        $this->createdPaths = [
+            app_path('Interfaces/CleatRepositoryInterface.php'),
+            app_path('Repositories/CleatRepository.php'),
+            app_path('Models/Cleat.php'),
+            app_path('Enums/CleatStatus.php'),
+            app_path('Filters/CleatFilters.php'),
+            app_path('Http/Requests/Cleat'),
+            app_path('Http/Resources/CleatResource.php'),
+            app_path('Http/Resources/CleatResourceCollection.php'),
+            app_path('Policies/CleatPolicy.php'),
+            app_path('Http/Controllers/CleatController.php'),
+            base_path('tests/Feature/CleatTest.php'),
+            base_path('tests/Unit/CleatServiceTest.php'),
+        ];
+
+        $this->artisan('make:module', [
+            'name' => 'Cleat',
+            '--no-service' => true,
+            '--no-migration' => true,
+        ])
+            ->expectsOutputToContain('App\Services\CleatService')
+            ->assertSuccessful();
+    }
+
+    public function test_no_model_reports_the_missing_model_the_repository_imports(): void
+    {
+        $this->createdPaths = [
+            app_path('Interfaces/GrommetRepositoryInterface.php'),
+            app_path('Repositories/GrommetRepository.php'),
+        ];
+
+        $this->artisan('make:module', [
+            'name' => 'Grommet',
+            '--only' => 'interface,repository',
+        ])
+            ->expectsOutputToContain('App\Models\Grommet')
+            ->assertSuccessful();
+    }
+
+    public function test_no_model_stays_quiet_when_the_model_already_exists(): void
+    {
+        $modelPath = app_path('Models/Ferrule.php');
+        File::ensureDirectoryExists(dirname($modelPath));
+        File::put($modelPath, "<?php\n\nnamespace App\\Models;\n\nclass Ferrule {}\n");
+
+        $this->createdPaths = [
+            $modelPath,
+            app_path('Interfaces/FerruleRepositoryInterface.php'),
+            app_path('Repositories/FerruleRepository.php'),
+        ];
+
+        $this->artisan('make:module', [
+            'name' => 'Ferrule',
+            '--only' => 'interface,repository',
+        ])
+            ->doesntExpectOutputToContain('reference classes that do not exist')
+            ->assertSuccessful();
+    }
+
+    public function test_complete_module_reports_no_missing_dependencies(): void
+    {
+        $this->createdPaths = [
+            app_path('Interfaces/RungRepositoryInterface.php'),
+            app_path('Repositories/RungRepository.php'),
+            app_path('Models/Rung.php'),
+            app_path('Enums/RungStatus.php'),
+            app_path('Filters/RungFilters.php'),
+            app_path('Services/RungService.php'),
+            app_path('Http/Requests/Rung'),
+            app_path('Http/Resources/RungResource.php'),
+            app_path('Http/Resources/RungResourceCollection.php'),
+            app_path('Policies/RungPolicy.php'),
+            app_path('Http/Controllers/RungController.php'),
+            base_path('tests/Feature/RungTest.php'),
+            base_path('tests/Unit/RungServiceTest.php'),
+        ];
+
+        $this->artisan('make:module', [
+            'name' => 'Rung',
+            '--no-migration' => true,
+        ])
+            ->doesntExpectOutputToContain('reference classes that do not exist')
+            ->assertSuccessful();
+    }
+
+    // -------------------------------------------------------------------------
+    // Mass assignment in the reduced controller
+    // -------------------------------------------------------------------------
+
+    /**
+     * The plain controller used to hand $request->except(['_token', '_method'])
+     * straight to the service — i.e. every request key reached a model generated
+     * with $guarded = [].
+     */
+    public function test_plain_controller_never_forwards_raw_request_input(): void
+    {
+        $controllerPath = app_path('Http/Controllers/ShimController.php');
+
+        $this->createdPaths = [
+            app_path('Interfaces/ShimRepositoryInterface.php'),
+            app_path('Repositories/ShimRepository.php'),
+            app_path('Models/Shim.php'),
+            app_path('Services/ShimService.php'),
+            $controllerPath,
+        ];
+
+        $this->artisan('make:module', [
+            'name' => 'Shim',
+            '--only' => 'interface,repository,model,service,controller',
+        ])->assertSuccessful();
+
+        $content = File::get($controllerPath);
+
+        $this->assertStringNotContainsString('$request->except(', $content);
+        $this->assertStringNotContainsString('$request->all(', $content);
+        $this->assertStringContainsString('$request->validate(', $content);
+        $this->assertStringContainsString('$this->service->store($data)', $content);
+        $this->assertStringContainsString('$this->service->update($id, $data)', $content);
     }
 }

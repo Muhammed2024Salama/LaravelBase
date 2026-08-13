@@ -36,6 +36,16 @@ trait ApiResponseTrait
         return ApiResponse::notFound($message);
     }
 
+    protected function unauthorized(?string $message = 'Unauthorized'): JsonResponse
+    {
+        return ApiResponse::unauthorized($message);
+    }
+
+    protected function forbidden(?string $message = 'Forbidden'): JsonResponse
+    {
+        return ApiResponse::forbidden($message);
+    }
+
     protected function created(mixed $data = null, ?string $message = 'Created successfully'): JsonResponse
     {
         return ApiResponse::created($data, $message);

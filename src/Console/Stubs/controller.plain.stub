@@ -29,14 +29,22 @@ class {{ controller }} extends Controller
 
     public function store(Request $request): JsonResponse
     {
-        // TODO: add validation — e.g. $request->validate(['field' => 'required|string'])
-        return $this->created($this->service->store($request->except(['_token', '_method'])));
+        // Only validated keys reach the model — never pass raw request input to
+        // a mass-assignable model. Extend these rules for your own columns.
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+        ]);
+
+        return $this->created($this->service->store($data));
     }
 
     public function update(Request $request, int|string $id): JsonResponse
     {
-        // TODO: add validation — e.g. $request->validate(['field' => 'sometimes|string'])
-        return $this->success($this->service->update($id, $request->except(['_token', '_method'])));
+        $data = $request->validate([
+            'name' => ['sometimes', 'required', 'string', 'max:255'],
+        ]);
+
+        return $this->success($this->service->update($id, $data));
     }
 
     public function destroy(int|string $id): JsonResponse

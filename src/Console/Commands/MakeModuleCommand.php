@@ -55,11 +55,40 @@ class MakeModuleCommand extends Command
         parent::__construct();
     }
 
+    /**
+     * PHP keywords that cannot be used as a class name.
+     *
+     * @var list<string>
+     */
+    private const RESERVED_NAMES = [
+        'abstract', 'and', 'array', 'as', 'break', 'callable', 'case', 'catch', 'class',
+        'clone', 'const', 'continue', 'declare', 'default', 'do', 'echo', 'else', 'elseif',
+        'empty', 'enddeclare', 'endfor', 'endforeach', 'endif', 'endswitch', 'endwhile',
+        'enum', 'eval', 'exit', 'extends', 'final', 'finally', 'fn', 'for', 'foreach',
+        'function', 'global', 'goto', 'if', 'implements', 'include', 'include_once',
+        'instanceof', 'insteadof', 'interface', 'isset', 'list', 'match', 'namespace',
+        'new', 'or', 'print', 'private', 'protected', 'public', 'readonly', 'require',
+        'require_once', 'return', 'static', 'switch', 'throw', 'trait', 'try', 'unset',
+        'use', 'var', 'while', 'xor', 'yield',
+        'bool', 'false', 'float', 'int', 'iterable', 'mixed', 'never', 'null', 'object',
+        'parent', 'self', 'string', 'true', 'void',
+    ];
+
     public function handle(): int
     {
         $class = Str::studly((string) $this->argument('name'));
+
+        if (! $this->isValidClassName($class, 'Module name')) {
+            return self::FAILURE;
+        }
+
         $modelOption = $this->option('model');
         $model = Str::studly(is_string($modelOption) && $modelOption !== '' ? $modelOption : $class);
+
+        if (! $this->isValidClassName($model, 'Model name')) {
+            return self::FAILURE;
+        }
+
         $rootNamespace = $this->laravel->getNamespace();
         $modelNs = $rootNamespace.'Models\\'.$model;
         $modelVariable = Str::camel($model);
@@ -69,6 +98,10 @@ class MakeModuleCommand extends Command
         $controller = Str::studly(is_string($ctrlOption) && $ctrlOption !== '' ? $ctrlOption : "{$class}Controller");
         if (! Str::endsWith($controller, 'Controller')) {
             $controller .= 'Controller';
+        }
+
+        if (! $this->isValidClassName($controller, 'Controller name')) {
+            return self::FAILURE;
         }
 
         /** @var array<string, string> $replacements */
@@ -210,11 +243,15 @@ class MakeModuleCommand extends Command
         $this->newLine();
         $this->info("✔  {$class} module generated successfully.");
 
+        $this->warnAboutMissingDependencies($class, $model);
+
         if ($this->option('provider')) {
             $this->line('   Binding written to RepositoryServiceProvider.');
             if (config('base.auto_bind', true)) {
                 $this->comment('   Tip: set auto_bind => false in config/base.php to use the provider as sole binding.');
             }
+        } elseif (! $this->shouldGenerate('interface') && ! $this->shouldGenerate('repository')) {
+            // Nothing to bind was generated in this run — stay quiet.
         } elseif (config('base.auto_bind', true)) {
             $this->line('   The interface is auto-bound to the repository — no manual binding needed.');
         } else {
@@ -223,6 +260,54 @@ class MakeModuleCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Report any class a generated file references that neither exists on disk
+     * nor was produced by this run — e.g. `--only=controller` emits a controller
+     * type-hinting a Service that was never generated.
+     *
+     * The files are still written (the developer may be regenerating one layer
+     * of an existing module); the point is that this is never silent.
+     */
+    protected function warnAboutMissingDependencies(string $class, string $model): void
+    {
+        $ns = $this->laravel->getNamespace();
+        $modelPath = app_path("Models/{$model}.php");
+        $modelClass = $ns."Models\\{$model}";
+
+        /** @var array<int, array{0: bool, 1: string, 2: string}> $requirements */
+        $requirements = [
+            [$this->shouldGenerate('controller'), app_path("Services/{$class}Service.php"), $ns."Services\\{$class}Service"],
+            [$this->shouldGenerate('service'), app_path("Interfaces/{$class}RepositoryInterface.php"), $ns."Interfaces\\{$class}RepositoryInterface"],
+            [$this->shouldGenerate('service'), app_path("Repositories/{$class}Repository.php"), $ns."Repositories\\{$class}Repository"],
+            [$this->shouldGenerate('repository'), app_path("Interfaces/{$class}RepositoryInterface.php"), $ns."Interfaces\\{$class}RepositoryInterface"],
+            [$this->shouldGenerate('service') && $this->shouldGenerate('filter'), app_path("Filters/{$class}Filters.php"), $ns."Filters\\{$class}Filters"],
+            [$this->shouldGenerate('repository'), $modelPath, $modelClass],
+            [$this->shouldGenerate('policy'), $modelPath, $modelClass],
+            [$this->shouldGenerate('controller') && $this->pickControllerStub() === 'module-controller.stub', $modelPath, $modelClass],
+        ];
+
+        $missing = [];
+
+        foreach ($requirements as [$needed, $path, $fqcn]) {
+            if ($needed && ! $this->files->exists($path)) {
+                $missing[$fqcn] = true;
+            }
+        }
+
+        if ($missing === []) {
+            return;
+        }
+
+        $this->newLine();
+        $this->warn('⚠  Generated files reference classes that do not exist yet:');
+
+        foreach (array_keys($missing) as $fqcn) {
+            $this->line("   - {$fqcn}");
+        }
+
+        $this->comment('   Generate them (or drop the matching --only/--except/--no-* flag) before using the module.');
     }
 
     // =========================================================================
@@ -280,16 +365,24 @@ class MakeModuleCommand extends Command
         $table = Str::snake(Str::pluralStudly($class));
         $existing = glob(database_path("migrations/*_create_{$table}_table.php")) ?: [];
 
-        if (! empty($existing) && ! $this->option('force')) {
+        if ($existing !== [] && ! $this->option('force')) {
             $this->warn("•  Migration for table '{$table}' already exists, skipped.");
 
             return;
         }
 
         $driver = $this->detectDatabaseDriver();
-        $timestamp = date('Y_m_d_His');
-        $filename = "{$timestamp}_create_{$table}_table.php";
-        $target = database_path("migrations/{$filename}");
+
+        if ($existing !== []) {
+            sort($existing);
+            $target = $existing[0];
+
+            foreach (array_slice($existing, 1) as $duplicate) {
+                $this->warn('•  Duplicate migration left untouched: '.$this->relative($duplicate));
+            }
+        } else {
+            $target = database_path('migrations/'.date('Y_m_d_His')."_create_{$table}_table.php");
+        }
 
         $metadataLine = match ($driver) {
             'mysql', 'pgsql' => "            \$table->json('metadata')->nullable();",
@@ -449,6 +542,31 @@ class MakeModuleCommand extends Command
         $flag = self::COMPONENT_FLAGS[$component] ?? null;
         if ($flag !== null) {
             return ! (bool) $this->option($flag);
+        }
+
+        return true;
+    }
+
+    /**
+     * Reject anything that is not a usable PHP class name.
+     *
+     * Without this, `make:module 123abc` writes `class 123abc extends Model`
+     * (a parse error), `make:module class` collides with a reserved word, and
+     * `make:module ../../evil` escapes app/ entirely because the name is
+     * interpolated straight into the destination path.
+     */
+    protected function isValidClassName(string $name, string $label): bool
+    {
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $name) !== 1) {
+            $this->error("{$label} '{$name}' is not a valid PHP class name. Use letters, digits and underscores, starting with a letter or underscore.");
+
+            return false;
+        }
+
+        if (in_array(strtolower($name), self::RESERVED_NAMES, true)) {
+            $this->error("{$label} '{$name}' is a reserved PHP keyword and cannot be used as a class name.");
+
+            return false;
         }
 
         return true;

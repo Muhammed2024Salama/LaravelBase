@@ -68,7 +68,11 @@ abstract class AbstractFilter
 
             $value = $this->request->get($column);
 
-            if ($operator === 'like') {
+            if (is_array($value) || is_object($value)) {
+                continue;
+            }
+
+            if (strtolower($operator) === 'like') {
                 $this->query->where($column, 'LIKE', '%'.$value.'%');
             } else {
                 $this->query->where($column, $operator, $value);
@@ -85,7 +89,13 @@ abstract class AbstractFilter
             return;
         }
 
-        $term = (string) $this->request->get('search', '');
+        $rawTerm = $this->request->get('search', '');
+
+        if (! is_scalar($rawTerm)) {
+            return;
+        }
+
+        $term = (string) $rawTerm;
         $columns = $this->searchable;
 
         $this->query->where(function (Builder $q) use ($term, $columns): void {
@@ -107,7 +117,8 @@ abstract class AbstractFilter
             return;
         }
 
-        $direction = strtolower((string) $this->request->get('sort_dir', 'asc'));
+        $rawDirection = $this->request->get('sort_dir', 'asc');
+        $direction = is_string($rawDirection) ? strtolower($rawDirection) : 'asc';
 
         $this->query->orderBy($sortBy, $direction === 'desc' ? 'desc' : 'asc');
     }

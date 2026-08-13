@@ -195,6 +195,86 @@ class AbstractFilterTest extends TestCase
         $this->assertSame(2, $paginator->total());
     }
 
+    // ── malformed (array) input must never 500 ────────────────────────────────
+
+    public function test_array_search_term_is_ignored_instead_of_erroring(): void
+    {
+        $filter = $this->makeFilter(['search' => ['Laravel', 'Hello']]);
+
+        $this->assertSame(3, $filter->getQuery()->count());
+    }
+
+    public function test_array_value_on_like_filter_is_ignored_instead_of_erroring(): void
+    {
+        $filter = $this->makeFilter(['title' => ['World', 'Laravel']]);
+
+        $this->assertSame(3, $filter->getQuery()->count());
+    }
+
+    public function test_array_sort_dir_falls_back_to_ascending(): void
+    {
+        $filter = $this->makeFilter(['sort_by' => 'id', 'sort_dir' => ['desc']]);
+
+        $results = $filter->getQuery()->pluck('id')->toArray();
+        $sorted = $results;
+        sort($sorted);
+
+        $this->assertSame($sorted, $results);
+    }
+
+    public function test_array_sort_by_is_ignored(): void
+    {
+        $filter = $this->makeFilter(['sort_by' => ['id']]);
+
+        $this->assertSame(3, $filter->getQuery()->count());
+    }
+
+    public function test_array_value_on_exact_filter_is_ignored(): void
+    {
+        $filter = $this->makeFilter(['status' => ['active', 'inactive']]);
+
+        $this->assertSame(3, $filter->getQuery()->count());
+    }
+
+    public function test_array_per_page_falls_back_to_a_valid_page_size(): void
+    {
+        $paginator = $this->makeFilter(['per_page' => ['5']])->paginate();
+
+        $this->assertGreaterThanOrEqual(1, $paginator->perPage());
+        $this->assertLessThanOrEqual(100, $paginator->perPage());
+    }
+
+    // ── sort column injection ─────────────────────────────────────────────────
+
+    public function test_sort_by_injection_payloads_are_rejected(): void
+    {
+        $payloads = [
+            'id; DROP TABLE posts',
+            'id) UNION SELECT 1,2,3 --',
+            'id`,(SELECT 1)`',
+            '(CASE WHEN 1=1 THEN id ELSE title END)',
+            'posts.id',
+        ];
+
+        foreach ($payloads as $payload) {
+            $filter = $this->makeFilter(['sort_by' => $payload]);
+
+            $this->assertSame(3, $filter->getQuery()->count(), "payload: {$payload}");
+            $this->assertStringNotContainsStringIgnoringCase(
+                'order by',
+                $filter->getQuery()->toSql(),
+                "payload: {$payload}"
+            );
+        }
+    }
+
+    public function test_filter_values_are_bound_not_interpolated(): void
+    {
+        $filter = $this->makeFilter(['status' => "active' OR '1'='1"]);
+
+        $this->assertSame(0, $filter->getQuery()->count());
+    }
+
     // ── combined filters + search ──────────────────────────────────────────────
 
     public function test_filter_and_search_combined(): void

@@ -100,6 +100,10 @@ class CreateDatabaseCommand extends Command
             return self::FAILURE;
         }
 
+        if (! $this->hasPdoDriver('pdo_mysql')) {
+            return self::FAILURE;
+        }
+
         $pdo = $this->connect("mysql:host={$host};port={$port}", $config);
 
         $statement = $pdo->prepare('SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?');
@@ -148,6 +152,10 @@ class CreateDatabaseCommand extends Command
             return self::FAILURE;
         }
 
+        if (! $this->hasPdoDriver('pdo_pgsql')) {
+            return self::FAILURE;
+        }
+
         $pdo = $this->connect("pgsql:host={$host};port={$port};dbname=postgres", $config);
 
         $statement = $pdo->prepare('SELECT 1 FROM pg_database WHERE datname = ?');
@@ -168,6 +176,24 @@ class CreateDatabaseCommand extends Command
         $this->info("✔ Created PostgreSQL database '{$database}' (encoding {$encoding}).");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Fail with a readable message instead of a fatal "Class PDO not found" /
+     * "could not find driver" when the PDO driver is not installed.
+     *
+     * Checked after identifier validation so a hostile configuration is still
+     * rejected on hosts without the extension.
+     */
+    protected function hasPdoDriver(string $extension): bool
+    {
+        if (extension_loaded('pdo') && extension_loaded($extension)) {
+            return true;
+        }
+
+        $this->error("The [{$extension}] PHP extension is required for this connection, but it is not loaded.");
+
+        return false;
     }
 
     /**
